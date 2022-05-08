@@ -321,7 +321,7 @@ def main():
             if args.train:
                 
                 ## save_path =  os.path.realpath(args.dir)
-                _save_path = "./"
+                _save_path = "../cellpose_sup/"
                 
                 cpmodel_path = model.train(images, labels, train_files=image_names,
                                            test_data=test_images, test_labels=test_labels, test_files=image_names_test,

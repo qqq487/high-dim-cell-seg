@@ -881,15 +881,17 @@ class UnetModel():
                                         rescale=rsc, scale_range=scale_range, unet=self.unet)
                 if self.unet and lbl.shape[1]>1 and rescale:
                     lbl[:,1] *= scale[:,np.newaxis,np.newaxis]**2#diam_batch[:,np.newaxis,np.newaxis]**2
-                train_loss, vec_loss, lbl_loss_1, lbl_loss_2 = self._train_step(imgi, lbl) ##
-                
-                writer.add_scalar('Loss/train-sum', train_loss, iepoch)
-                writer.add_scalar('Loss/train-vec', vec_loss, iepoch)
-                writer.add_scalar('Loss/train-bce', lbl_loss_1, iepoch)
-                writer.add_scalar('Loss/train-focel', lbl_loss_2, iepoch)
+                ##
+                train_loss, vec_loss, lbl_loss_1, lbl_loss_2 = self._train_step(imgi, lbl)
                 
                 lavg += train_loss
                 nsum += len(imgi) 
+                
+                ##
+                writer.add_scalar('Loss/train-sum', lavg/nsum, iepoch)
+                writer.add_scalar('Loss/train-vec', vec_loss, iepoch)
+                writer.add_scalar('Loss/train-bce', lbl_loss_1, iepoch)
+                writer.add_scalar('Loss/train-focel', lbl_loss_2, iepoch)
             
             if iepoch%10==0 or iepoch==5:
                 lavg = lavg / nsum
@@ -905,16 +907,19 @@ class UnetModel():
                                             scale_range=0., rescale=rsc, unet=self.unet) 
                         if self.unet and lbl.shape[1]>1 and rescale:
                             lbl[:,1] *= scale[:,np.newaxis,np.newaxis]**2
-                            
+                        
                         ##
                         test_loss, test_vec_loss, test_lbl_loss_1, test_lbl_loss_2 = self._test_eval(imgi, lbl)
-                        writer.add_scalar('Val/test-sum', test_loss, iepoch)
+                    
+                        lavgt += test_loss
+                        nsum += len(imgi)  
+                            
+                        ##
+                        writer.add_scalar('Val/test-sum', lavgt/nsum, iepoch)
                         writer.add_scalar('Val/test-vec', test_vec_loss, iepoch)
                         writer.add_scalar('Val/test-bce', test_lbl_loss_1, iepoch)
                         writer.add_scalar('Val/test-focal', test_lbl_loss_2, iepoch)
-                
-                        lavgt += test_loss
-                        nsum += len(imgi)
+
 
                     core_logger.info('Epoch %d, Time %4.1fs, Loss %2.4f, Loss Test %2.4f, LR %2.4f'%
                             (iepoch, time.time()-tic, lavg, lavgt/nsum, self.learning_rate[iepoch]))
