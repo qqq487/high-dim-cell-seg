@@ -180,7 +180,7 @@ class CPnet(nn.Module):
         super(CPnet, self).__init__()
         
         ##
-        nbase[0] = 1 ## 44
+        nbase[0] = 1
         print("nbase = ",nbase)
         
         self.nbase = nbase
@@ -276,7 +276,7 @@ class ChannelPool_max(nn.Module):
 class SpatialGate_max(nn.Module):
     def __init__(self):
         super(SpatialGate_max, self).__init__()
-        kernel_size = 7
+        kernel_size = 3
         self.compress = ChannelPool_max()
         self.spatial = BasicConv(1, 1, kernel_size, stride=1, padding=(kernel_size-1) // 2, relu=False)
     def forward(self, x):

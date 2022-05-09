@@ -769,7 +769,8 @@ class UnetModel():
                         
             self.criterion  = nn.MSELoss(reduction='mean')
             self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean')
-            self.criterion3 = losses.FocalLoss() ## losses.BinaryDiceLoss() ##
+            #self.criterion3 = losses.BinaryDiceLoss()
+            self.criterion3 = losses.FocalLoss() ## default gamma 2
             
     def _train_net(self, train_data, train_labels, 
               test_data=None, test_labels=None,
@@ -841,10 +842,16 @@ class UnetModel():
 
         
         lavg, nsum = 0, 0
+        
+        ##
+        min_loss_train = 1000
+        min_loss_val = 1000
 
         if save_path is not None:
             _, file_label = os.path.split(save_path)
-            file_path = os.path.join(save_path, 'models/')
+            ##
+            file_path = save_path
+            #file_path = os.path.join(save_path, 'models/')##
 
             if not os.path.exists(file_path):
                 os.makedirs(file_path)
@@ -891,7 +898,8 @@ class UnetModel():
                 writer.add_scalar('Loss/train-sum', lavg/nsum, iepoch)
                 writer.add_scalar('Loss/train-vec', vec_loss, iepoch)
                 writer.add_scalar('Loss/train-bce', lbl_loss_1, iepoch)
-                writer.add_scalar('Loss/train-focel', lbl_loss_2, iepoch)
+                #writer.add_scalar('Loss/train-dice', lbl_loss_2, iepoch)
+                writer.add_scalar('Loss/train-focal', lbl_loss_2, iepoch)
             
             if iepoch%10==0 or iepoch==5:
                 lavg = lavg / nsum
@@ -918,11 +926,24 @@ class UnetModel():
                         writer.add_scalar('Val/test-sum', lavgt/nsum, iepoch)
                         writer.add_scalar('Val/test-vec', test_vec_loss, iepoch)
                         writer.add_scalar('Val/test-bce', test_lbl_loss_1, iepoch)
+                        #writer.add_scalar('Val/test-dice', test_lbl_loss_2, iepoch)
                         writer.add_scalar('Val/test-focal', test_lbl_loss_2, iepoch)
 
 
                     core_logger.info('Epoch %d, Time %4.1fs, Loss %2.4f, Loss Test %2.4f, LR %2.4f'%
                             (iepoch, time.time()-tic, lavg, lavgt/nsum, self.learning_rate[iepoch]))
+                    
+                    ##
+                    if lavg < min_loss_train and (lavgt/nsum) < min_loss_val:
+                        
+                        min_loss_train = lavg
+                        min_loss_val = (lavgt/nsum)
+                        
+                        file_name = 'best_eopch'     
+                        file_name = os.path.join(file_path, file_name)
+                        core_logger.info(f'saving network parameters to {file_name}')
+                        self.net.save_model(file_name)
+                    
                 else:
                     core_logger.info('Epoch %d, Time %4.1fs, Loss %2.4f, LR %2.4f'%
                             (iepoch, time.time()-tic, lavg, self.learning_rate[iepoch]))
@@ -936,7 +957,7 @@ class UnetModel():
                         if model_name is None:
                             file_name = '{}_{}_{}_{}'.format(self.net_type, file_label, 
                                                              d.strftime("%Y_%m_%d_%H_%M_%S.%f"),
-                                                             'epoch_'+str(iepoch)) 
+                                                             'epoch_'+str(iepoch))
                         else:
                             file_name = '{}_{}'.format(model_name, 'epoch_'+str(iepoch))
                     else:

@@ -118,7 +118,12 @@ def main():
     training_args.add_argument('--save_every',
                         default=100, type=int, help='number of epochs to skip between saves. Default: %(default)s')
     training_args.add_argument('--save_each', action='store_true', help='save the model under a different filename per --save_every epoch for later comparsion')
+    ##
+    training_args.add_argument('--ckpt_save_dir', default=None, type=str, help='where to save ckpts')
+    training_args.add_argument('--self_training', action='store_true', help='self-training or not')
+    training_args.add_argument('--topk_pseudo_label', default=25, type=int, help='how many pseudo labels for next stage (in percentage %)')
     
+
     # misc settings
     parser.add_argument('--verbose', action='store_true', help='show information about running and settings and save to log')
     
@@ -321,7 +326,10 @@ def main():
             if args.train:
                 
                 ## save_path =  os.path.realpath(args.dir)
-                _save_path = "../cellpose_sup/"
+                if args.ckpt_save_dir == None:
+                    _save_path = "../cellpose_sup/models/"
+                else:
+                    _save_path = args.ckpt_save_dir
                 
                 cpmodel_path = model.train(images, labels, train_files=image_names,
                                            test_data=test_images, test_labels=test_labels, test_files=image_names_test,

@@ -683,7 +683,8 @@ class CellposeModel(UnetModel):
         vec_loss = self.criterion(y[:,:2] , veci) #  nn.MSELoss(reduction='mean')
         vec_loss /= 2.
         lbl_loss_1 = self.criterion2(y[:,2] , lbl) #  nn.BCEWithLogitsLoss(reduction='mean')
-        lbl_loss_2 = self.criterion3(y[:,2] , lbl)*10 ##  BinaryDiceLoss() or Focal loss
+        #lbl_loss_2 = self.criterion3(y[:,2] , lbl) ##  BinaryDiceLoss()
+        lbl_loss_2 = self.criterion3(y[:,2] , lbl)*10 ## Focal loss
         loss = vec_loss + lbl_loss_1 + lbl_loss_2 ##
         return loss, vec_loss, lbl_loss_1, lbl_loss_2    
 
