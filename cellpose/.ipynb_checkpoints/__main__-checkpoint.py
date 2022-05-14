@@ -4,8 +4,9 @@ import subprocess
 import numpy as np
 from natsort import natsorted
 from tqdm import tqdm
-from cellpose import utils, models, io, core
+from cellpose import utils, models, io, core, metrics
 
+import pickle
 
 try:
     from cellpose.gui import gui 
@@ -40,7 +41,7 @@ def main():
     input_img_args.add_argument('--img_filter',
                         default=[], type=str, help='end string for images to run on')
     input_img_args.add_argument('--channel_axis',
-                        default=None, type=int, help='axis of image which corresponds to image channels')
+                        default=0, type=int, help='axis of image which corresponds to image channels')
     input_img_args.add_argument('--z_axis',
                         default=None, type=int, help='axis of image which corresponds to Z dimension')
     input_img_args.add_argument('--chan',
@@ -118,11 +119,15 @@ def main():
     training_args.add_argument('--save_every',
                         default=100, type=int, help='number of epochs to skip between saves. Default: %(default)s')
     training_args.add_argument('--save_each', action='store_true', help='save the model under a different filename per --save_every epoch for later comparsion')
+    
     ##
+    training_args.add_argument('--unlabeled_dir',default=None, type=str, help='folder containing unlabeled data (optional)')
+    training_args.add_argument('--train_txt',default=None, type=str, help='pre-defined training imgs, instead of os.listdir')
+    training_args.add_argument('--val_txt',default=None, type=str, help='pre-defined validation imgs, instead of os.listdir')
+    training_args.add_argument('--pseudo_txt',default=None, type=str, help='pre-defined pseudo labeled imgs')
     training_args.add_argument('--ckpt_save_dir', default=None, type=str, help='where to save ckpts')
     training_args.add_argument('--self_training', action='store_true', help='self-training or not')
     training_args.add_argument('--topk_pseudo_label', default=25, type=int, help='how many pseudo labels for next stage (in percentage %)')
-    
 
     # misc settings
     parser.add_argument('--verbose', action='store_true', help='show information about running and settings and save to log')
@@ -189,15 +194,19 @@ def main():
                 szmean = 30.
         builtin_size = model_type == 'cyto' or model_type == 'cyto2' or model_type == 'nuclei'
         
+        
+        ############  Inference stage  #################
         if not args.train and not args.train_size:
             tic = time.time()
 
-            image_names = io.get_image_files(args.dir, 
+            image_names = io.get_image_files(args.dir,
+                                             None,
                                              args.mask_filter, 
                                              imf=imf,
                                              look_one_level_down=args.look_one_level_down)
             nimg = len(image_names)
-                
+            
+
             cstr0 = ['GRAY', 'RED', 'GREEN', 'BLUE']
             cstr1 = ['NONE', 'RED', 'GREEN', 'BLUE']
             logger.info('>>>> running cellpose on %d images using chan_to_seg %s and chan (opt) %s'%
@@ -216,7 +225,7 @@ def main():
                 model = models.CellposeModel(gpu=gpu, device=device, 
                                              pretrained_model=pretrained_model,
                                              model_type=model_type,
-                                             net_avg=False)
+                                             net_avg=False, nchan = 60) ## HERE
             
             # handle diameters
             if args.diameter==0:
@@ -234,8 +243,21 @@ def main():
             
             tqdm_out = utils.TqdmToLogger(logger,level=logging.INFO)
             
+            ##
+            name_aji_dict = {}
+            
             for image_name in tqdm(image_names, file=tqdm_out):
-                image = io.imread(image_name)
+                name = os.path.basename(image_name)
+                print("Now inference : {}".format(name))
+                
+                
+                if args.self_training:
+                    image, nuclei_img = io.imread(image_name, return_nuclei = True)
+
+                else:
+                    image = io.imread(image_name)
+                
+
                 out = model.eval(image, channels=channels, diameter=diameter,
                                 do_3D=args.do_3D, net_avg=(not args.fast_mode or args.net_avg),
                                 augment=False,
@@ -252,6 +274,7 @@ def main():
                                 anisotropy=args.anisotropy,
                                 model_loaded=True)
                 masks, flows = out[:2]
+
                 if len(out) > 3:
                     diams = out[-1]
                 else:
@@ -260,16 +283,51 @@ def main():
                     masks = utils.remove_edge_masks(masks)
                 if not args.no_npy:
                     io.masks_flows_to_seg(image, masks, flows, diams, image_name, channels)
+                
                 if saving_something:
+           
+                    if args.self_training:                        
+                        grow_pixel = 3
+                        nuclei_model = models.CellposeModel(gpu=args.use_gpu, model_type='cyto',nchan = 2, org_cp_model = True) ## or try model_type = 'cyto'?
+                        nuclei_channels = [[0,0]]
+                        nuclei_masks, nuclei_flows, _ = nuclei_model.eval(nuclei_img, diameter=None, flow_threshold=None, channels=nuclei_channels)
+                        growed_masks = utils.grow_masks(nuclei_masks, growth = grow_pixel, num_neighbors = 30)                    
+                    
+                        ## filter masks without nuclei signal
+                        masks = utils.filter_masks_without_nuclei(masks, nuclei_masks)
+                    
+
+                        ## cal aji for sorting the pseudo label quality
+                        aji_score = metrics.aggregated_jaccard_index(growed_masks, masks)
+                        name_aji_dict[name] = aji_score.mean()
+                    
                     io.save_masks(image, masks, flows, image_name, png=args.save_png, tif=args.save_tif,
                                   save_flows=args.save_flows,save_outlines=args.save_outlines,
                                   save_ncolor=args.save_ncolor,dir_above=args.dir_above,savedir=args.savedir,
                                   save_txt=args.save_txt,in_folders=args.in_folders)
-            logger.info('>>>> completed in %0.3f sec'%(time.time()-tic))
-        else:
             
+            
+            if args.self_training:
+                ## save sorted result for record
+                sorted_name_aji = sorted(name_aji_dict.items(), key=lambda x: x[1], reverse=True)
+                with open('sorted_name_aji.pkl', 'wb') as f:
+                    pickle.dump(sorted_name_aji, f)
+
+                ## get top 25% for next stage semi-training
+                reliable_label_num = int(len(sorted_name_aji)*(args.topk_pseudo_label/100))
+                
+                with open(args.pseudo_txt, 'a') as f:
+                    for i in range(reliable_label_num):
+                        f.write(sorted_name_aji[i][0]+'\n')
+
+            logger.info('>>>> completed in %0.3f sec'%(time.time()-tic))
+        
+        
+        ############  Training stage  #################
+        else:    
             test_dir = None if len(args.test_dir)==0 else args.test_dir
-            output = io.load_train_test_data(args.dir, test_dir, imf, args.mask_filter, args.unet, args.look_one_level_down)
+            ##
+            output = io.load_train_test_data(args.dir, test_dir, args.unlabeled_dir, imf, args.mask_filter, args.unet, args.look_one_level_down, args.train_txt, args.val_txt, args.pseudo_txt)
             
             
             images, labels, image_names, test_images, test_labels, image_names_test = output
@@ -277,7 +335,6 @@ def main():
             # training with all channels
             if args.all_channels:
                 img = images[0]
-                print("img.shape = ",img.shape)
                 if img.ndim==3:
                     nchan = min(img.shape)
                 elif img.ndim==2:

@@ -5,6 +5,12 @@ from tqdm import trange, tqdm
 from urllib.parse import urlparse
 import torch
 
+seed = 1116
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+np.random.seed(seed)
+
 import logging
 models_logger = logging.getLogger(__name__)
 
@@ -312,7 +318,7 @@ class CellposeModel(UnetModel):
                     model_type=None, net_avg=False,
                     diam_mean=30., device=None,
                     residual_on=True, style_on=True, concatenation=False,
-                    nchan=2):
+                    nchan=2, org_cp_model = False): ##
         self.torch = True
         if isinstance(pretrained_model, np.ndarray):
             pretrained_model = list(pretrained_model)
@@ -321,7 +327,8 @@ class CellposeModel(UnetModel):
     
         self.diam_mean = diam_mean
         builtin = True
-        
+        ##
+        self.org_cp_model = org_cp_model
 
         if model_type is not None or (pretrained_model and not os.path.exists(pretrained_model[0])):
             pretrained_model_string = model_type if model_type is not None else 'cyto'
@@ -361,7 +368,7 @@ class CellposeModel(UnetModel):
         super().__init__(gpu=gpu, pretrained_model=False,
                          diam_mean=self.diam_mean, net_avg=net_avg, device=device,
                          residual_on=residual_on, style_on=style_on, concatenation=concatenation,
-                        nchan=nchan)
+                        nchan=nchan, org_cp_model = False)
 
         self.unet = False
         self.pretrained_model = pretrained_model
@@ -535,8 +542,10 @@ class CellposeModel(UnetModel):
         else:
             if not model_loaded and (isinstance(self.pretrained_model, list) and not net_avg and not loop_run):
                 self.net.load_model(self.pretrained_model[0], cpu=(not self.gpu))
-                
+            
+            channel_axis = 0
             # reshape image (normalization happens in _run_cp)
+
             x = transforms.convert_image(x, channels, channel_axis=channel_axis, z_axis=z_axis,
                                          do_3D=(do_3D or stitch_threshold>0), 
                                          normalize=False, invert=False, nchan=self.nchan)
@@ -579,12 +588,10 @@ class CellposeModel(UnetModel):
                 flow_threshold=0.4, min_size=15,
                 interp=True, anisotropy=1.0, do_3D=False, stitch_threshold=0.0,
                 ):
-        
 
         tic = time.time()
         shape = x.shape
-        nimg = shape[0]   
-        
+        nimg = shape[0]        
         
         bd, tr = None, None
         if do_3D:
@@ -621,8 +628,7 @@ class CellposeModel(UnetModel):
                                            tile_overlap=tile_overlap)
                 if resample:
                     yf = transforms.resize_image(yf, shape[1], shape[2])
-                    
-
+                
                 cellprob[i] = yf[:,:,2]
                 dP[:, i] = yf[:,:,:2].transpose((2,0,1)) 
                 if self.nclasses == 4:
@@ -652,13 +658,15 @@ class CellposeModel(UnetModel):
             else:
                 masks, p = [], []
                 resize = [shape[1], shape[2]] if not resample else None
-                for i in iterator:
+                                
+                for i in iterator:                 
+
                     outputs = dynamics.compute_masks(dP[:,i], cellprob[i], niter=niter, cellprob_threshold=cellprob_threshold,
                                                          flow_threshold=flow_threshold, interp=interp, resize=resize,
                                                          use_gpu=self.gpu, device=self.device)
                     masks.append(outputs[0])
                     p.append(outputs[1])
-                    
+
                 masks = np.array(masks)
                 p = np.array(p)
                 
@@ -676,18 +684,18 @@ class CellposeModel(UnetModel):
         return masks, styles, dP, cellprob, p
 
         
-    def loss_fn(self, lbl, y):
+    def loss_fn(self, lbl, y, mode = 'loss'):
         """ loss function between true labels lbl and prediction y """
+
         veci = 5. * self._to_device(lbl[:,1:])
         lbl  = self._to_device(lbl[:,0]>.5)
         vec_loss = self.criterion(y[:,:2] , veci) #  nn.MSELoss(reduction='mean')
-        vec_loss /= 2.
+        vec_loss /= 2. ## HERE: org /=2
         lbl_loss_1 = self.criterion2(y[:,2] , lbl) #  nn.BCEWithLogitsLoss(reduction='mean')
-        #lbl_loss_2 = self.criterion3(y[:,2] , lbl) ##  BinaryDiceLoss()
-        lbl_loss_2 = self.criterion3(y[:,2] , lbl)*10 ## Focal loss
+        lbl_loss_2 = self.criterion3(y[:,2] , lbl) ##  BinaryDiceLoss()
+        #lbl_loss_2 = self.criterion3(y[:,2] , lbl)*10 ## Focal loss
         loss = vec_loss + lbl_loss_1 + lbl_loss_2 ##
         return loss, vec_loss, lbl_loss_1, lbl_loss_2    
-
 
     def train(self, train_data, train_labels, train_files=None, 
               test_data=None, test_labels=None, test_files=None,

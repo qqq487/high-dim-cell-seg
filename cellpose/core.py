@@ -11,6 +11,13 @@ from . import transforms, dynamics, utils, plot, metrics, losses
 
 
 import torch
+
+seed = 1116
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+np.random.seed(seed)
+
 #     from GPUtil import showUtilization as gpu_usage #for gpu memory debugging 
 from torch import nn
 from torch.utils import mkldnn as mkldnn_utils
@@ -93,7 +100,7 @@ class UnetModel():
     def __init__(self, gpu=False, pretrained_model=False,
                     diam_mean=30., net_avg=False, device=None,
                     residual_on=False, style_on=False, concatenation=True,
-                    nclasses=3, nchan=2):
+                    nclasses=3, nchan=2, org_cp_model=False):
         self.unet = True
         self.torch = True
         self.mkldnn = None
@@ -118,17 +125,29 @@ class UnetModel():
         # create network
         self.nclasses = nclasses
         self.nbase = [32,64,128,256]
-        self.nchan = 44 ## 44
+        self.nchan = nchan ## 44
         
-        self.nbase = [1, 32, 64, 128, 256]
-        self.net = resnet_torch.CPnet(self.nbase, 
-                                        self.nclasses, 
-                                        sz=3,
-                                        residual_on=residual_on, 
-                                        style_on=style_on,
-                                        concatenation=concatenation,
-                                        mkldnn=self.mkldnn,
-                                        diam_mean=diam_mean).to(self.device)
+        self.nbase = [1, 32, 64, 128, 256]        
+        if self.org_cp_model:
+            
+            self.nbase[0] = self.nchan
+            self.net = resnet_torch.CPnet_org(self.nbase, 
+                                                self.nclasses, 
+                                                sz=3,
+                                                residual_on=residual_on, 
+                                                style_on=style_on,
+                                                concatenation=concatenation,
+                                                mkldnn=self.mkldnn,
+                                                diam_mean=diam_mean).to(self.device)
+        else: 
+            self.net = resnet_torch.CPnet(self.nbase, 
+                                            self.nclasses, 
+                                            sz=3,
+                                            residual_on=residual_on, 
+                                            style_on=style_on,
+                                            concatenation=concatenation,
+                                            mkldnn=self.mkldnn,
+                                            diam_mean=diam_mean).to(self.device)
         
         if pretrained_model is not None and isinstance(pretrained_model, str):
             self.net.load_model(pretrained_model, cpu=(not self.gpu))
@@ -747,6 +766,7 @@ class UnetModel():
             test_loss *= len(x)
         return test_loss, vec_loss, lbl_loss_1, lbl_loss_2
 
+    
     def _set_optimizer(self, learning_rate, momentum, weight_decay, SGD=False):
         if SGD:
             self.optimizer = torch.optim.SGD(self.net.parameters(), lr=learning_rate,
@@ -769,8 +789,8 @@ class UnetModel():
                         
             self.criterion  = nn.MSELoss(reduction='mean')
             self.criterion2 = nn.BCEWithLogitsLoss(reduction='mean')
-            #self.criterion3 = losses.BinaryDiceLoss()
-            self.criterion3 = losses.FocalLoss() ## default gamma 2
+            self.criterion3 = losses.BinaryDiceLoss()
+            #self.criterion3 = losses.FocalLoss() ## default gamma 2
             
     def _train_net(self, train_data, train_labels, 
               test_data=None, test_labels=None,
@@ -779,8 +799,7 @@ class UnetModel():
               SGD=True, batch_size=8, nimg_per_epoch=None, rescale=True, model_name=None): 
         """ train function uses loss function self.loss_fn in models.py"""
         
-        d = datetime.datetime.now()
-        
+        d = datetime.datetime.now()        
         
         writer = SummaryWriter() ##
         self.n_epochs = n_epochs
@@ -898,8 +917,8 @@ class UnetModel():
                 writer.add_scalar('Loss/train-sum', lavg/nsum, iepoch)
                 writer.add_scalar('Loss/train-vec', vec_loss, iepoch)
                 writer.add_scalar('Loss/train-bce', lbl_loss_1, iepoch)
-                #writer.add_scalar('Loss/train-dice', lbl_loss_2, iepoch)
-                writer.add_scalar('Loss/train-focal', lbl_loss_2, iepoch)
+                writer.add_scalar('Loss/train-dice', lbl_loss_2, iepoch)
+                #writer.add_scalar('Loss/train-focal', lbl_loss_2, iepoch)
             
             if iepoch%10==0 or iepoch==5:
                 lavg = lavg / nsum
@@ -907,6 +926,7 @@ class UnetModel():
                     lavgt, nsum = 0., 0
                     np.random.seed(42)
                     rperm = np.arange(0, len(test_data), 1, int)
+                    
                     for ibatch in range(0,len(test_data),batch_size):
                         inds = rperm[ibatch:ibatch+batch_size]
                         rsc = diam_test[inds] / self.diam_mean if rescale else np.ones(len(inds), np.float32)
@@ -915,6 +935,7 @@ class UnetModel():
                                             scale_range=0., rescale=rsc, unet=self.unet) 
                         if self.unet and lbl.shape[1]>1 and rescale:
                             lbl[:,1] *= scale[:,np.newaxis,np.newaxis]**2
+                        
                         
                         ##
                         test_loss, test_vec_loss, test_lbl_loss_1, test_lbl_loss_2 = self._test_eval(imgi, lbl)
@@ -926,8 +947,9 @@ class UnetModel():
                         writer.add_scalar('Val/test-sum', lavgt/nsum, iepoch)
                         writer.add_scalar('Val/test-vec', test_vec_loss, iepoch)
                         writer.add_scalar('Val/test-bce', test_lbl_loss_1, iepoch)
-                        #writer.add_scalar('Val/test-dice', test_lbl_loss_2, iepoch)
-                        writer.add_scalar('Val/test-focal', test_lbl_loss_2, iepoch)
+                        writer.add_scalar('Val/test-dice', test_lbl_loss_2, iepoch)
+                        
+                        #writer.add_scalar('Val/test-focal', test_lbl_loss_2, iepoch)
 
 
                     core_logger.info('Epoch %d, Time %4.1fs, Loss %2.4f, Loss Test %2.4f, LR %2.4f'%
@@ -939,7 +961,7 @@ class UnetModel():
                         min_loss_train = lavg
                         min_loss_val = (lavgt/nsum)
                         
-                        file_name = 'best_eopch'     
+                        file_name = 'best_epoch'     
                         file_name = os.path.join(file_path, file_name)
                         core_logger.info(f'saving network parameters to {file_name}')
                         self.net.save_model(file_name)

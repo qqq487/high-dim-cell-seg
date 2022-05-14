@@ -6,6 +6,11 @@ from torch import optim
 import torch.nn.functional as F
 import datetime
 
+seed = 1116
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.cuda.manual_seed_all(seed)
+np.random.seed(seed)
 
 from . import transforms, io, dynamics, utils
 
@@ -172,6 +177,7 @@ class upsample(nn.Module):
             x = self.up[n](x, xd[n], style, mkldnn=mkldnn)
         return x
     
+    
 class CPnet(nn.Module):
     def __init__(self, nbase, nout, sz,
                 residual_on=True, style_on=True, 
@@ -204,20 +210,34 @@ class CPnet(nn.Module):
         self.diam_mean = nn.Parameter(data=torch.ones(1) * diam_mean, requires_grad=False)
         self.diam_labels = nn.Parameter(data=torch.ones(1) * diam_mean, requires_grad=False)
         self.style_on = style_on
-        
-        self.spatial = SpatialGate_max()
+        self.compress = ChannelPool_max()
+        self.spatial = SpatialGate()#SpatialGate_max()
         
     def forward(self, data):
         
-        #print("before spatial data shape = ",data.size())
-                
         if self.mkldnn:
             data = data.to_mkldnn()
             
-        data = self.spatial(data)
+        # data = self.spatial(data)
         
-        #print("after spatial data shape = ",data.size())
+        batch_size = data.size()[0]
+        channel_size = data.size()[1]
+        spatial_x = []
+        for batch_i in range(batch_size):
+            _data = data[batch_i]
+            _spatial_x = []
+            for channel_i in range(channel_size):
+                _spatial_x.append(self.spatial(_data[channel_i].unsqueeze(0).unsqueeze(0)))
+                
+            _stack_spatial_x = torch.stack(_spatial_x).squeeze(1).squeeze(1)
+            
+            spatial_x.append(_stack_spatial_x)
+        
+        stack_spatial_x = torch.stack(spatial_x)#.squeeze(1)
+        data = self.compress(stack_spatial_x)
 
+        
+        
         T0    = self.downsample(data)
         if self.mkldnn:
             style = self.make_style(T0[-1].to_dense()) 
@@ -250,7 +270,52 @@ class CPnet(nn.Module):
                           self.diam_mean)
             state_dict = torch.load(filename, map_location=torch.device('cpu'))
         self.load_state_dict(dict([(name, param) for name, param in state_dict.items()]), strict=False)
+    
+    
+    
+## org CPnet for nuclei pretrain model
+class CPnet_org(CPnet):
+    def __init__(self, nbase, nout, sz,
+                residual_on=True, style_on=True, 
+                concatenation=False, mkldnn=False,
+                diam_mean=30.):
+        super(CPnet, self).__init__()
+        self.nbase = nbase
+        self.nout = nout
+        self.sz = sz
+        self.residual_on = residual_on
+        self.style_on = style_on
+        self.concatenation = concatenation
+        self.mkldnn = mkldnn if mkldnn is not None else False
+        self.downsample = downsample(nbase, sz, residual_on=residual_on)
+        nbaseup = nbase[1:]
+        nbaseup.append(nbaseup[-1])
+        self.upsample = upsample(nbaseup, sz, residual_on=residual_on, concatenation=concatenation)
+        self.make_style = make_style()
+        self.output = batchconv(nbaseup[0], nout, 1)
+        self.diam_mean = nn.Parameter(data=torch.ones(1) * diam_mean, requires_grad=False)
+        self.diam_labels = nn.Parameter(data=torch.ones(1) * diam_mean, requires_grad=False)
+        self.style_on = style_on
         
+    def forward(self, data):
+        if self.mkldnn:
+            data = data.to_mkldnn()
+        T0    = self.downsample(data)
+        if self.mkldnn:
+            style = self.make_style(T0[-1].to_dense()) 
+        else:
+            style = self.make_style(T0[-1])
+        style0 = style
+        if not self.style_on:
+            style = style * 0
+        T0 = self.upsample(style, T0, self.mkldnn)
+        T0    = self.output(T0)
+        if self.mkldnn:
+            T0 = T0.to_dense()    
+            #T1 = T1.to_dense()    
+        return T0, style0
+    
+
 ##
 class BasicConv(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size, stride=1, padding=0, dilation=1, groups=1, relu=True, bn=True, bias=False):
@@ -267,12 +332,23 @@ class BasicConv(nn.Module):
         if self.relu is not None:
             x = self.relu(x)
         return x
+    
 class ChannelPool_max(nn.Module):
     def forward(self, x):
         
         return torch.max(x,1)[0].unsqueeze(1)
         #return torch.tensor(np.max(x_np,1)).unsqueeze(1)
 
+class SpatialGate(nn.Module):
+    def __init__(self):
+        super(SpatialGate, self).__init__()
+        kernel_size = 7
+        self.spatial = BasicConv(1, 1, kernel_size, stride=1, padding=(kernel_size-1) // 2, relu=False)
+    def forward(self, x):
+        x_out = self.spatial(x)
+        scale = torch.sigmoid(x_out) # broadcasting
+        return x * scale
+        
 class SpatialGate_max(nn.Module):
     def __init__(self):
         super(SpatialGate_max, self).__init__()

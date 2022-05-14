@@ -65,29 +65,39 @@ def outlines_to_text(base, outlines):
             f.write(xy_str)
             f.write('\n')
 
-def imread(filename):
+def imread(filename, pad_size = 60, include_nuclei=True, return_nuclei=False):
     
-    ##
+    ## input as dir due to multi-channel
     if os.path.isdir(filename):
         imgs_paths = glob.glob(filename+'/*.png')
         img_list = []
+        nuclei_img = None
         for imgs_path in imgs_paths:
+            
+            if ("DAPI" in imgs_path or "Ch1Cy1" in imgs_path):
+                nuclei_img = cv2.imread(imgs_path, -1)
+                nuclei_img = nuclei_img[np.newaxis,:]
+                if not include_nuclei:
+                    continue
+            
             img = cv2.imread(imgs_path, -1)#cv2.LOAD_IMAGE_ANYDEPTH)
             if img.ndim > 2:
                 img = img[..., [2,1,0]]
-                
             img_list.append(img)
         img = np.dstack(img_list).transpose(2, 0, 1)
         
-        if img.shape[0] < 44:
-            pad_size = 44 - img.shape[0] 
+        if img.shape[0] < pad_size:
+            pad_size = pad_size - img.shape[0] 
             _tmp = np.zeros((pad_size,img.shape[1],img.shape[2]))
             img = np.vstack((img,_tmp))
-        ##
-        #img = img.transpose(1, 2, 0)
-        print("shape = ",img.shape)
-        return img
-
+        
+        ## return nuclei when pseudo labeling, we need nuclei channel to eval pseudo masks quality
+        if return_nuclei:
+            return img, nuclei_img
+        else:
+            return img
+    
+    ## input single file
     else:
         ext = os.path.splitext(filename)[-1]
         if ext== '.tif' or ext=='.tiff':
@@ -142,40 +152,60 @@ def imsave(filename, arr):
         cv2.imwrite(filename, arr)
 #         skimage.io.imsave(filename, arr.astype()) #cv2 doesn't handle transparency
 
-def get_image_files(folder, mask_filter, imf=None, look_one_level_down=False):
+def get_image_files(folder, unlabeled_folder, mask_filter, imf=None, look_one_level_down=False, txt_file=None, pseudo_txt=None):
     """ find all images in a folder and if look_one_level_down all subfolders """
-    mask_filters = ['_cp_masks', '_cp_output', '_flows', '_masks', mask_filter]
-    image_names = []
-    if imf is None:
-        imf = ''
     
-    folders = []
-    if look_one_level_down:
-        folders = natsorted(glob.glob(os.path.join(folder, "*/")))
-    folders.append(folder)
+    if txt_file is None:
+    
+        mask_filters = ['_cp_masks', '_cp_output', '_flows', '_masks', mask_filter]
+        image_names = []
+        if imf is None:
+            imf = ''
 
-    for folder in folders:
-        image_names.extend(glob.glob(folder + '/*%s.png'%imf))
-        image_names.extend(glob.glob(folder + '/*%s.jpg'%imf))
-        image_names.extend(glob.glob(folder + '/*%s.jpeg'%imf))
-        image_names.extend(glob.glob(folder + '/*%s.tif'%imf))
-        image_names.extend(glob.glob(folder + '/*%s.tiff'%imf))
-        ##
-        image_names.extend(glob.glob(folder+'/*'))
-    image_names = natsorted(image_names)
-    
-    
-    imn = []
-    for im in image_names:
-        imfile = os.path.splitext(im)[0]
-        igood = all([(len(imfile) > len(mask_filter) and imfile[-len(mask_filter):] != mask_filter) or len(imfile) <= len(mask_filter) 
-                        for mask_filter in mask_filters])
-        if len(imf)>0:
-            igood &= imfile[-len(imf):]==imf
-        if igood:
-            imn.append(im)
-    image_names = imn
+        folders = []
+        if look_one_level_down:
+            folders = natsorted(glob.glob(os.path.join(folder, "*/")))
+        folders.append(folder)
 
+        image_names = [os.path.join(folder,f) for f in os.listdir(folder) if not f.startswith('.')]
+
+        #image_names.extend(glob.glob(folder+'/*'))
+        image_names = natsorted(image_names)
+
+        imn = []
+        for im in image_names:
+            imfile = os.path.splitext(im)[0]
+            igood = all([(len(imfile) > len(mask_filter) and imfile[-len(mask_filter):] != mask_filter) or len(imfile) <= len(mask_filter) 
+                            for mask_filter in mask_filters])
+            if len(imf)>0:
+                igood &= imfile[-len(imf):]==imf
+            if igood:
+                imn.append(im)
+        image_names = imn
+        
+    else:
+        image_names = []
+        
+        ## load labeled imgs names from label txt file.
+        f = open(txt_file, 'r')
+        _labeled_image_names = (f.read().splitlines())
+        labeled_image_names = [os.path.join(folder,f) for f in _labeled_image_names]
+        image_names.extend(labeled_image_names)
+        
+        ## concat training imgs names with pseudo labeled imgs.
+        pseudo_image_names = []
+        if pseudo_txt is not None:
+            f = open(pseudo_txt, 'r')
+            _pseudo_image_names = (f.read().splitlines())
+            pseudo_image_names = [os.path.join(unlabeled_folder,f) for f in _pseudo_image_names]
+            
+            ## oversampling labeled imgs to the same size of pseudo labeled ones.
+            while len(image_names) < len(pseudo_image_names):
+                image_names.extend(labeled_image_names)
+            image_names.extend(pseudo_image_names)
+            
+        print("Loaded {} imgs, {} labeled, {} pseudo-labeled.".format(len(image_names),len(labeled_image_names),len(pseudo_image_names)))
+        
     if len(image_names)==0:
         raise ValueError('ERROR: no images in --dir folder')
         
@@ -224,8 +254,8 @@ def get_label_files(image_names, mask_filter, imf=None):
     return label_names, flow_names
 
 
-def load_images_labels(tdir, mask_filter='_masks', image_filter=None, look_one_level_down=False, unet=False):
-    image_names = get_image_files(tdir, mask_filter, image_filter, look_one_level_down)
+def load_images_labels(tdir, unlabeled_dir=None, mask_filter='_masks', image_filter=None, look_one_level_down=False, unet=False, txt_file=None, pseudo_txt=None):
+    image_names = get_image_files(tdir, unlabeled_dir, mask_filter, image_filter, look_one_level_down, txt_file, pseudo_txt)
     nimg = len(image_names)
 
     # training data
@@ -234,7 +264,8 @@ def load_images_labels(tdir, mask_filter='_masks', image_filter=None, look_one_l
     images = []
     labels = []
     k = 0
-    for n in range(nimg):
+    print("load_images_labels: ")
+    for n in tqdm(range(nimg)):
         if os.path.isfile(label_names[n]):
             image = imread(image_names[n])
             label = imread(label_names[n])
@@ -251,12 +282,12 @@ def load_images_labels(tdir, mask_filter='_masks', image_filter=None, look_one_l
     io_logger.info(f'{k} / {nimg} images in {tdir} folder have labels')
     return images, labels, image_names
 
-def load_train_test_data(train_dir, test_dir=None, image_filter=None, mask_filter='_masks', unet=False, look_one_level_down=False):
-    images, labels, image_names = load_images_labels(train_dir, mask_filter, image_filter, look_one_level_down, unet)
+def load_train_test_data(train_dir, test_dir=None, unlabeled_dir = None, image_filter=None, mask_filter='_masks', unet=False, look_one_level_down=False, train_txt=None, val_txt=None, pseudo_txt=None):
+    images, labels, image_names = load_images_labels(train_dir, unlabeled_dir, mask_filter, image_filter, look_one_level_down, unet, train_txt, pseudo_txt)
     # testing data
     test_images, test_labels, test_image_names = None, None, None
     if test_dir is not None:
-        test_images, test_labels, test_image_names = load_images_labels(test_dir, mask_filter, image_filter, look_one_level_down, unet)
+        test_images, test_labels, test_image_names = load_images_labels(test_dir, None, mask_filter, image_filter, look_one_level_down, unet, val_txt, None)
 
     return images, labels, image_names, test_images, test_labels, test_image_names
 
@@ -399,7 +430,6 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
         be similar and touch. Any color map can be applied to it (0,1,2,3,4,...).
     
     """
-
     if isinstance(masks, list):
         for image, mask, flow, file_name in zip(images, masks, flows, file_names):
             save_masks(image, mask, flow, file_name, png=png, tif=tif, suffix=suffix,dir_above=dir_above,
@@ -454,8 +484,9 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for ext in exts:
-            
-            imsave(os.path.join(maskdir,basename + '_cp_masks' + suffix + ext), masks)
+            ## 
+            imsave(os.path.join(maskdir,basename + '_masks' + suffix + ext), masks)
+            # imsave(os.path.join(maskdir,basename + '_cp_masks' + suffix + ext), masks)
             
     if png and MATPLOTLIB and not min(images.shape) > 3:
         img = images.copy()
@@ -481,6 +512,11 @@ def save_masks(images, masks, flows, file_names, png=True, tif=False, channels=[
         outlines = utils.masks_to_outlines(masks)
         outX, outY = np.nonzero(outlines)
         img0 = transforms.normalize99(images)
+        
+        
+        ## stack img to one channel
+        img0 = np.max(img0, 0)
+        
         if img0.shape[0] < 4:
             img0 = np.transpose(img0, (1,2,0))
         if img0.shape[-1] < 3 or img0.ndim < 3:
